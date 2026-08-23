@@ -1,0 +1,12 @@
+{
+  "key.vietnamesetelex.toggle": "Toggle Vietnamese Telex",
+  "message.vietnamesetelex.enabled": "[Telex] Vietnamese input: ON",
+  "message.vietnamesetelex.disabled": "[Telex] Vietnamese input: OFF",
+  "overlay.vietnamesetelex.indicator": "[TELEX]",
+
+  "vietnamesetelex.configuration.title": "Vietnamese Telex",
+  "vietnamesetelex.configuration.section.vietnamesetelex.client.toml": "Vietnamese Telex",
+  "vietnamesetelex.configuration.section.vietnamesetelex.client.toml.title": "Vietnamese Telex",
+  "vietnamesetelex.configuration.enabled": "Enable Telex in chat",
+  "vietnamesetelex.configuration.showIndicator": "Show chat indicator"
+}

@@ -1,0 +1,12 @@
+{
+  "key.vietnamesetelex.toggle": "Bật/tắt gõ Telex tiếng Việt",
+  "message.vietnamesetelex.enabled": "[Telex] Đang gõ tiếng Việt: BẬT",
+  "message.vietnamesetelex.disabled": "[Telex] Đang gõ tiếng Việt: TẮT",
+  "overlay.vietnamesetelex.indicator": "[TELEX]",
+
+  "vietnamesetelex.configuration.title": "Telex tiếng Việt",
+  "vietnamesetelex.configuration.section.vietnamesetelex.client.toml": "Telex tiếng Việt",
+  "vietnamesetelex.configuration.section.vietnamesetelex.client.toml.title": "Telex tiếng Việt",
+  "vietnamesetelex.configuration.enabled": "Bật bộ gõ trong khung chat",
+  "vietnamesetelex.configuration.showIndicator": "Hiện chỉ báo khi mở chat"
+}
