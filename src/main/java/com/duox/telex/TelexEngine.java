@@ -1,54 +1,73 @@
 package com.duox.telex;
 
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 
 /**
- * Pure-Java Telex to Vietnamese converter for a single word (letters only, no spaces).
+ * Java port of the OpenKey Vietnamese typing engine (Sources/OpenKey/engine),
+ * reduced to Telex + precomposed Unicode output.
  *
- * <p>The engine keeps no state: the caller feeds the raw ASCII typed so far for the
- * current word and gets back the display form. Because the raw buffer is kept by the
- * caller, backspacing one character automatically "un-types" the last action
- * (e.g. raw "duongs" renders as duong-with-sac, one backspace renders "duong"),
- * exactly like a real Telex input method.</p>
- *
- * <p>Rules implemented:
+ * <p>Like OpenKey, the engine keeps a word buffer in which every entry is a key
+ * code decorated with flags:</p>
  * <ul>
- *   <li>Tone keys (anywhere after the onset): s sac, f huyen, r hoi, x nga, j nang.</li>
- *   <li>Vowel keys: aa -> â, aw -> ă, ee -> ê, oo -> ô, ow -> o+horn, uw -> u+horn,
- *       leading w -> u+horn, dd -> đ.</li>
- *   <li>Glide spellings accepted: "uo" = uong-glide ("duong" -> d-u-o-horn),
- *       "ie"/"ye" = i-circ/y-circ ("dien" -> dien-with-circ).</li>
- *   <li>Syllable validation against ~170 Vietnamese rhymes so English words such as
- *       "hello" or "english" pass through untouched, while retro-active tones still
- *       work ("chao" + "s" -> chao-with-sac, "muon" -> muon-with-hoi-on-o).</li>
- * </ul></p>
+ *   <li>{@link #CAPS} - typed with shift</li>
+ *   <li>{@link #TONE} - circumflex (^): a->â e->ê o->ô, d->đ</li>
+ *   <li>{@link #TONEW} - horn/breve (w): a->ă o->ơ u->ư, standalone w->ư</li>
+ *   <li>{@link #M1}..{@link #M5} - sắc huyền hỏi ngã nặng</li>
+ *   <li>{@link #STANDALONE} - the ư originated from a lone "w"</li>
+ * </ul>
+ *
+ * <p>Each key is matched incrementally against OpenKey's pattern tables
+ * ({@code _vowel}, {@code _vowelForMark}, {@code _consonantD}, ...) and after
+ * every key {@link #checkGrammar()} re-places marks onto the correct vowel, so
+ * modifiers may arrive in any order ("nguowfi" -> người, "chuiwr" -> chửi).</p>
+ *
+ * <p>Mod-specific additions on top of OpenKey (see {@link #normalize}):</p>
+ * <ul>
+ *   <li>"khong" -> "khoong" (pure structure cannot know this one)</li>
+ *   <li>bare glide spellings get an implicit trailing w / doubled e:
+ *       "duong" -> dương, "nguoi" -> người, "dien" -> diên</li>
+ * </ul>
  */
 public final class TelexEngine {
 
     private TelexEngine() {
     }
 
-    /** Marks indexed [base vowel][tone], tone 1..5 = huyen, sac, hoi, nga, nang. */
+    // ------------------------------------------------------------------
+    // Flags (bit layout mirrors OpenKey DataType.h)
+    // ------------------------------------------------------------------
+
+    private static final int CAPS = 1 << 16;
+    private static final int TONE = 1 << 17;
+    private static final int TONEW = 1 << 18;
+    private static final int M1 = 1 << 19; // sắc
+    private static final int M2 = 1 << 20; // huyền
+    private static final int M3 = 1 << 21; // hỏi
+    private static final int M4 = 1 << 22; // ngã
+    private static final int M5 = 1 << 23; // nặng
+    private static final int MARK_MASK = M1 | M2 | M3 | M4 | M5;
+    private static final int STANDALONE = 1 << 24;
+
+    private static final int MAX_BUFF = 32;
+
+    /** Tone diacritics indexed [base vowel][1=sắc 2=huyền 3=hỏi 4=ngã 5=nặng]. */
     private static final Map<Character, String[]> MARKS = new HashMap<>();
 
     static {
-        put("a", "àáảãạ");
-        put("ă", "ằắẳẵặ");
-        put("â", "ầấẩẫậ");
-        put("e", "èéẻẽẹ");
-        put("ê", "ềếểễệ");
-        put("i", "ìíỉĩị");
-        put("o", "òóỏõọ");
-        put("ô", "ồốổỗộ");
-        put("ơ", "ờớởỡợ");
-        put("u", "ùúủũụ");
-        put("ư", "ừứửữự");
-        put("y", "ỳýỷỹỵ");
+        put("a", "áàảãạ");
+        put("ă", "ắằẳẵặ");
+        put("â", "ấầẩẫậ");
+        put("e", "éèẻẽẹ");
+        put("ê", "ếềểễệ");
+        put("i", "íìỉĩị");
+        put("o", "óòỏõọ");
+        put("ô", "ốồổỗộ");
+        put("ơ", "ớờởỡợ");
+        put("u", "úùủũụ");
+        put("ư", "ứừửữự");
+        put("y", "ýỳỷỹỵ");
     }
 
     private static void put(String base, String marks) {
@@ -60,370 +79,1047 @@ public final class TelexEngine {
         MARKS.put(base.charAt(0), t);
     }
 
-    /** s sac, f huyen, r hoi, x nga, j nang (index into MARKS tone 2,1,3,4,5). */
-    private static final String TONE_KEYS = "sfrxj";
-    private static final int[] TONE_INDEX = {2, 1, 3, 4, 5};
-
-    /**
-     * Whole-word raw rewrites for frequent lexical ambiguities that pure
-     * syllable structure cannot resolve. Applied to the lowercased word before
-     * parsing, e.g. "khong" would otherwise stay literal because kh+ong is a
-     * well-formed parse, while every Vietnamese speaker means không.
-     */
-    private static final Map<String, String> RAW_OVERRIDES = Map.of(
-            "khong", "khoong");
-
-    private static final Set<Character> VOWELS =
-            Set.of('a', 'ă', 'â', 'e', 'ê', 'i', 'o', 'ô', 'ơ', 'u', 'ư', 'y');
-
     // ------------------------------------------------------------------
-    // Rhyme table
+    // Pattern tables (ported from Vietnamese.cpp)
     // ------------------------------------------------------------------
 
-    /** A rhyme: display spelling, index of the tone-bearing char, accepted raw ASCII forms. */
-    private record Rhyme(String display, int anchor, List<String> raws) {
+    private static int k(char c) {
+        return c;
     }
 
-    private static final List<Rhyme> RHYMES = new ArrayList<>();
-    private static final Map<String, Rhyme> BY_RAW = new HashMap<>();
+    /** _vowel: trigger key -> list of tail patterns (matched against word suffix). */
+    private static final Map<Character, int[][]> VOWEL = new HashMap<>();
+    /** _vowelForMark: mark placement candidate tails. */
+    private static final Map<Character, int[][]> VOWEL_FOR_MARK = new HashMap<>();
+    /** _vowelCombine: {canHaveEndConsonant, elems...}; elems may carry TONE/TONEW requirement. */
+    private static final Map<Character, int[][]> VOWEL_COMBINE = new HashMap<>();
+    /** _consonantD: rhymes that turn a leading d into đ. */
+    private static final int[][] CONSONANT_D;
+    /** _consonantTable: valid onsets. */
+    private static final int[][] CONSONANT_TABLE;
+    /** _endConsonantTable: valid ending consonants. */
+    private static final int[][] END_CONSONANT_TABLE;
+    /** _standaloneWbad: single characters after which w stays literal. */
+    private static final char[] STANDALONE_W_BAD = {'w', 'e', 'y', 'f', 'j', 'k', 'z'};
+    /** _doubleWAllowed: two-letter onsets after which a lone w becomes ư. */
+    private static final char[][] DOUBLE_W_ALLOWED = {
+            {'t', 'r'}, {'t', 'h'}, {'c', 'h'}, {'n', 'h'}, {'n', 'g'},
+            {'k', 'h'}, {'g', 'i'}, {'p', 'h'}, {'g', 'h'},
+    };
 
-    private static void rhyme(String display) {
-        int anchor = anchorOf(display);
-        List<String> raws = rawForms(display);
-        Rhyme r = new Rhyme(display, anchor, raws);
-        RHYMES.add(r);
-        for (String raw : raws) {
-            BY_RAW.putIfAbsent(raw, r);
-        }
+    private static void putPatterns(Map<Character, int[][]> map, char key, int[][] patterns) {
+        map.put(key, patterns);
     }
 
     static {
-        // zero coda
-        for (String v : new String[]{
-                "a", "ă", "â", "e", "ê", "i", "y", "o", "ô", "ơ", "u", "ư",
-                "oa", "oe", "uy", "ia", "ya", "ua", "ưa", "uya"}) {
-            rhyme(v);
-        }
-        // coda i / y
-        for (String v : new String[]{
-                "ai", "ay", "ây", "oi", "ôi", "ơi", "ui", "ưi", "uôi", "ươi",
-                "oai", "oay", "uay"}) {
-            rhyme(v);
-        }
-        // coda u / o
-        for (String v : new String[]{
-                "ao", "au", "âu", "eo", "êu", "iu", "iêu", "yêu", "ưu", "ươu"}) {
-            rhyme(v);
-        }
-        // coda m
-        for (String v : new String[]{
-                "am", "ăm", "âm", "em", "êm", "im", "om", "ôm", "ơm", "um",
-                "iêm", "yêm", "ươm"}) {
-            rhyme(v);
-        }
-        // coda n
-        for (String v : new String[]{
-                "an", "ăn", "ân", "en", "ên", "in", "on", "ôn", "ơn", "un",
-                "ươn", "iên", "yên", "uan", "uân", "oan", "oân", "oăn", "uyên"}) {
-            rhyme(v);
-        }
-        // coda ng / nh
-        for (String v : new String[]{
-                "ang", "ăng", "âng", "anh", "inh", "ênh", "ong", "ông", "ung",
-                "ưng", "ương", "iêng", "oang", "oâng", "uâng", "uanh"}) {
-            rhyme(v);
-        }
-        // codas c / ch / t / p
-        for (String v : new String[]{
-                "ac", "ăc", "âc", "ach", "at", "ăt", "ât", "ap", "ăp", "âp",
-                "ec", "êc", "êch", "êt", "êp",
-                "ic", "ich", "it", "ip",
-                "oc", "ot", "op", "ôc", "ôt", "ôp",
-                "uc", "ut", "up", "ưc", "ưt", "ưp",
-                "iêt", "iêp", "yêt",
-                "uôc", "uôt",
-                "ươc", "ươt", "ươp",
-                "oat", "oac",
-                "uat", "uât", "uêt", "uyêt"}) {
-            rhyme(v);
-        }
-    }
+        // ---- _vowel ----
+        putPatterns(VOWEL, 'a', new int[][]{
+                {k('a'), k('n'), k('g')}, {k('a'), k('g')},
+                {k('a'), k('n')}, {k('a'), k('m')}, {k('a'), k('u')},
+                {k('a'), k('y')}, {k('a'), k('t')}, {k('a'), k('p')},
+                {k('a')}, {k('a'), k('c')},
+        });
+        putPatterns(VOWEL, 'o', new int[][]{
+                {k('o'), k('n'), k('g')}, {k('o'), k('g')},
+                {k('o'), k('n')}, {k('o'), k('m')}, {k('o'), k('i')},
+                {k('o'), k('c')}, {k('o'), k('t')}, {k('o'), k('p')},
+                {k('o')},
+        });
+        putPatterns(VOWEL, 'e', new int[][]{
+                {k('e'), k('n'), k('h')}, {k('e'), k('h')},
+                {k('e'), k('n'), k('g')}, {k('e'), k('g')},
+                {k('e'), k('c'), k('h')}, {k('e'), k('k')},
+                {k('e'), k('c')}, {k('e'), k('t')}, {k('e'), k('y')},
+                {k('e'), k('u')}, {k('e'), k('p')},
+                {k('e'), k('c')}, {k('e'), k('n')}, {k('e'), k('m')},
+                {k('e')},
+        });
+        putPatterns(VOWEL, 'w', new int[][]{
+                {k('o'), k('n')},
+                {k('u'), k('o'), k('n'), k('g')}, {k('u'), k('o'), k('g')},
+                {k('u'), k('o'), k('n')},
+                {k('u'), k('o'), k('i')},
+                {k('u'), k('o'), k('c')},
+                {k('o'), k('i')}, {k('o'), k('p')}, {k('o'), k('m')},
+                {k('o'), k('a')}, {k('o'), k('t')},
+                {k('u'), k('n'), k('g')}, {k('u'), k('g')},
+                {k('a'), k('n'), k('g')}, {k('a'), k('g')},
+                {k('u'), k('n')}, {k('u'), k('m')}, {k('u'), k('c')},
+                {k('u'), k('a')}, {k('u'), k('i')}, {k('u'), k('t')},
+                {k('u')},
+                {k('a'), k('p')}, {k('a'), k('t')}, {k('a'), k('m')},
+                {k('a'), k('n')}, {k('a')}, {k('a'), k('c')},
+                {k('a'), k('c'), k('h')}, {k('a'), k('k')},
+                {k('o')}, {k('u'), k('u')},
+        });
 
-    /** Index of the tone-bearing character inside the display spelling of a rhyme. */
-    private static int anchorOf(String d) {
-        if (d.startsWith("ươi") || d.startsWith("ươ") || d.startsWith("iê") || d.startsWith("yê")) {
-            return 1;
-        }
-        if (d.startsWith("uô") || d.startsWith("uâ")
-                || d.startsWith("oa") || d.startsWith("oe") || d.startsWith("oy")
-                || d.startsWith("uai") || d.startsWith("oai") || d.startsWith("uay")
-                || d.startsWith("oay") || d.startsWith("uy") || d.startsWith("uya")) {
-            return 1;
-        }
-        return 0;
-    }
+        // ---- _vowelCombine ----
+        putPatterns(VOWEL_COMBINE, 'a', new int[][]{
+                {0, k('a'), k('i')}, {0, k('a'), k('o')}, {0, k('a'), k('u')},
+                {0, k('a') | TONE, k('u')}, {0, k('a'), k('y')}, {0, k('a') | TONE, k('y')},
+        });
+        putPatterns(VOWEL_COMBINE, 'e', new int[][]{
+                {0, k('e'), k('o')}, {0, k('e') | TONE, k('u')},
+        });
+        putPatterns(VOWEL_COMBINE, 'i', new int[][]{
+                {1, k('i'), k('e') | TONE, k('u')}, {0, k('i'), k('a')},
+                {1, k('i'), k('e') | TONE}, {0, k('i'), k('u')},
+        });
+        putPatterns(VOWEL_COMBINE, 'o', new int[][]{
+                {0, k('o'), k('a'), k('i')}, {0, k('o'), k('a'), k('o')},
+                {0, k('o'), k('a'), k('y')}, {0, k('o'), k('e'), k('o')},
+                {1, k('o'), k('a')}, {1, k('o'), k('a') | TONEW},
+                {1, k('o'), k('e')}, {0, k('o'), k('i')},
+                {0, k('o') | TONE, k('i')}, {0, k('o') | TONEW, k('i')},
+                {1, k('o'), k('o')}, {1, k('o') | TONE, k('o') | TONE},
+        });
+        putPatterns(VOWEL_COMBINE, 'u', new int[][]{
+                {0, k('u'), k('y'), k('u')}, {1, k('u'), k('y'), k('e') | TONE},
+                {0, k('u'), k('y'), k('a')},
+                {0, k('u') | TONEW, k('o') | TONEW, k('u')},
+                {0, k('u') | TONEW, k('o') | TONEW, k('i')},
+                {0, k('u'), k('o') | TONE, k('i')},
+                {0, k('u'), k('a') | TONE, k('y')},
+                {1, k('u'), k('a'), k('o')}, {1, k('u'), k('a')},
+                {1, k('u'), k('a') | TONEW}, {1, k('u'), k('a') | TONE},
+                {0, k('u') | TONEW, k('a')},
+                {1, k('u'), k('e') | TONE}, {0, k('u'), k('i')},
+                {0, k('u') | TONEW, k('i')}, {1, k('u'), k('o')},
+                {1, k('u'), k('o') | TONE}, {0, k('u'), k('o') | TONEW},
+                {1, k('u') | TONEW, k('o') | TONEW}, {0, k('u') | TONEW, k('u')},
+                {1, k('u'), k('y')},
+        });
+        putPatterns(VOWEL_COMBINE, 'y', new int[][]{
+                {0, k('y'), k('e') | TONE, k('u')}, {1, k('y'), k('e') | TONE},
+        });
 
-    /** ASCII forms that type the given display rhyme. */
-    private static List<String> rawForms(String d) {
-        String coda;
-        if (d.startsWith("ươ")) { // uong-family: duong / duwong / duwowng
-            coda = d.substring(2);
-            return List.of("uo" + coda, "uwo" + coda, "uwow" + coda);
-        }
-        if (d.startsWith("uyê")) { // uyên: thuyen / thuyeen
-            coda = d.substring(3);
-            return List.of("uye" + coda, "uyee" + coda);
-        }
-        if (d.startsWith("iê")) { // iên: dien / dieen
-            coda = d.substring(2);
-            return List.of("ie" + coda, "iee" + coda);
-        }
-        if (d.startsWith("yê")) { // yên: yen / yeen
-            coda = d.substring(2);
-            return List.of("ye" + coda, "yee" + coda);
-        }
-        if (d.startsWith("uô")) { // uôi/uôn/... explicit oo only (bare uo belongs to uong-family)
-            coda = d.substring(2);
-            return List.of("uoo" + coda);
-        }
-        // standard per-character expansion
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < d.length(); i++) {
-            sb.append(simpleRaw(d.charAt(i)));
-        }
-        return List.of(sb.toString());
-    }
+        // ---- _consonantD ----
+        CONSONANT_D = new int[][]{
+                {k('d'), k('e'), k('n'), k('h')}, {k('d'), k('e'), k('h')},
+                {k('d'), k('e'), k('n'), k('g')}, {k('d'), k('e'), k('g')},
+                {k('d'), k('e'), k('c'), k('h')}, {k('d'), k('e'), k('k')},
+                {k('d'), k('e'), k('n')}, {k('d'), k('e'), k('c')},
+                {k('d'), k('e'), k('m')}, {k('d'), k('e')},
+                {k('d'), k('e'), k('t')}, {k('d'), k('e'), k('u')},
+                {k('d'), k('e'), k('o')}, {k('d'), k('e'), k('p')},
+                {k('d'), k('u'), k('n'), k('g')}, {k('d'), k('u'), k('g')},
+                {k('d'), k('u'), k('n')}, {k('d'), k('u'), k('m')},
+                {k('d'), k('u'), k('c')}, {k('d'), k('u'), k('o')},
+                {k('d'), k('u'), k('a')}, {k('d'), k('u'), k('o'), k('i')},
+                {k('d'), k('u'), k('o'), k('c')}, {k('d'), k('u'), k('o'), k('n')},
+                {k('d'), k('u'), k('o'), k('n'), k('g')}, {k('d'), k('u'), k('o'), k('g')},
+                {k('d'), k('u')}, {k('d'), k('u'), k('p')}, {k('d'), k('u'), k('t')},
+                {k('d'), k('u'), k('i')},
+                {k('d'), k('i'), k('c'), k('h')}, {k('d'), k('i'), k('k')},
+                {k('d'), k('i'), k('c')},
+                {k('d'), k('i'), k('n'), k('h')}, {k('d'), k('i'), k('h')},
+                {k('d'), k('i'), k('n')}, {k('d'), k('i')},
+                {k('d'), k('i'), k('a')}, {k('d'), k('i'), k('e')},
+                {k('d'), k('i'), k('e'), k('c')}, {k('d'), k('i'), k('e'), k('u')},
+                {k('d'), k('i'), k('e'), k('n')}, {k('d'), k('i'), k('e'), k('m')},
+                {k('d'), k('i'), k('e'), k('p')}, {k('d'), k('i'), k('t')},
+                {k('d'), k('o')}, {k('d'), k('o'), k('a')},
+                {k('d'), k('o'), k('a'), k('n')},
+                {k('d'), k('o'), k('a'), k('n'), k('g')}, {k('d'), k('o'), k('a'), k('g')},
+                {k('d'), k('o'), k('a'), k('n'), k('h')}, {k('d'), k('o'), k('a'), k('h')},
+                {k('d'), k('o'), k('a'), k('m')}, {k('d'), k('o'), k('e')},
+                {k('d'), k('o'), k('i')}, {k('d'), k('o'), k('p')},
+                {k('d'), k('o'), k('c')}, {k('d'), k('o'), k('n')},
+                {k('d'), k('o'), k('n'), k('g')}, {k('d'), k('o'), k('g')},
+                {k('d'), k('o'), k('m')}, {k('d'), k('o'), k('t')},
+                {k('d'), k('a')}, {k('d'), k('a'), k('t')}, {k('d'), k('a'), k('y')},
+                {k('d'), k('a'), k('u')}, {k('d'), k('a'), k('i')}, {k('d'), k('a'), k('o')},
+                {k('d'), k('a'), k('p')}, {k('d'), k('a'), k('c')},
+                {k('d'), k('a'), k('c'), k('h')}, {k('d'), k('a'), k('k')},
+                {k('d'), k('a'), k('n')},
+                {k('d'), k('a'), k('n'), k('h')}, {k('d'), k('a'), k('h')},
+                {k('d'), k('a'), k('n'), k('g')}, {k('d'), k('a'), k('g')},
+                {k('d'), k('a'), k('m')},
+                {k('d')},
+        };
 
-    private static String simpleRaw(char c) {
-        return switch (c) {
-            case 'ă' -> "aw";
-            case 'â' -> "aa";
-            case 'ê' -> "ee";
-            case 'ô' -> "oo";
-            case 'ơ' -> "ow";
-            case 'ư' -> "uw";
-            default -> String.valueOf(c);
+        // ---- _vowelForMark ----
+        putPatterns(VOWEL_FOR_MARK, 'a', new int[][]{
+                {k('a'), k('n'), k('g')}, {k('a'), k('g')},
+                {k('a'), k('n')},
+                {k('a'), k('n'), k('h')}, {k('a'), k('h')},
+                {k('a'), k('m')}, {k('a'), k('u')}, {k('a'), k('y')},
+                {k('a'), k('t')}, {k('a'), k('p')}, {k('a')}, {k('a'), k('c')},
+                {k('a'), k('i')}, {k('a'), k('o')},
+                {k('a'), k('c'), k('h')}, {k('a'), k('k')},
+        });
+        putPatterns(VOWEL_FOR_MARK, 'o', new int[][]{
+                {k('o'), k('o'), k('n'), k('g')}, {k('o'), k('o'), k('g')},
+                {k('o'), k('n'), k('g')}, {k('o'), k('g')},
+                {k('o'), k('o'), k('n')}, {k('o'), k('o'), k('c')},
+                {k('o'), k('o')},
+                {k('o'), k('n')}, {k('o'), k('m')}, {k('o'), k('i')},
+                {k('o'), k('c')}, {k('o'), k('t')}, {k('o'), k('p')},
+                {k('o')},
+        });
+        putPatterns(VOWEL_FOR_MARK, 'e', new int[][]{
+                {k('e'), k('n'), k('h')}, {k('e'), k('h')},
+                {k('e'), k('n'), k('g')}, {k('e'), k('g')},
+                {k('e'), k('c'), k('h')}, {k('e'), k('k')},
+                {k('e'), k('c')}, {k('e'), k('t')}, {k('e'), k('y')},
+                {k('e'), k('u')}, {k('e'), k('p')},
+                {k('e'), k('c')}, {k('e'), k('n')}, {k('e'), k('m')},
+                {k('e')},
+        });
+        putPatterns(VOWEL_FOR_MARK, 'i', new int[][]{
+                {k('i'), k('n'), k('h')}, {k('i'), k('h')},
+                {k('i'), k('c'), k('h')}, {k('i'), k('k')},
+                {k('i'), k('n')}, {k('i'), k('t')}, {k('i'), k('u')},
+                {k('i'), k('u'), k('p')},
+                {k('i'), k('n')}, {k('i'), k('m')}, {k('i'), k('p')},
+                {k('i'), k('a')}, {k('i'), k('c')},
+                {k('i')},
+        });
+        putPatterns(VOWEL_FOR_MARK, 'u', new int[][]{
+                {k('u'), k('n'), k('g')}, {k('u'), k('g')},
+                {k('u'), k('i')}, {k('u'), k('o')}, {k('u'), k('y')},
+                {k('u'), k('y'), k('n')}, {k('u'), k('y'), k('t')},
+                {k('u'), k('y'), k('p')},
+                {k('u'), k('y'), k('c'), k('h')}, {k('u'), k('y'), k('k')},
+                {k('u'), k('y'), k('n'), k('h')}, {k('u'), k('y'), k('h')},
+                {k('u'), k('t')}, {k('u'), k('u')}, {k('u'), k('a')},
+                {k('u'), k('i')}, {k('u'), k('c')}, {k('u'), k('n')},
+                {k('u'), k('m')}, {k('u'), k('p')},
+                {k('u')},
+        });
+        putPatterns(VOWEL_FOR_MARK, 'y', new int[][]{
+                {k('y')},
+        });
+
+        // ---- _consonantTable ----
+        CONSONANT_TABLE = new int[][]{
+                {k('n'), k('g'), k('h')},
+                {k('p'), k('h')}, {k('t'), k('h')}, {k('t'), k('r')},
+                {k('g'), k('i')}, {k('c'), k('h')}, {k('n'), k('h')},
+                {k('n'), k('g')}, {k('k'), k('h')}, {k('g'), k('h')},
+                {k('g')}, {k('c')}, {k('q')}, {k('k')}, {k('t')}, {k('r')},
+                {k('h')}, {k('b')}, {k('m')}, {k('v')}, {k('n')}, {k('l')},
+                {k('x')}, {k('p')}, {k('s')}, {k('d')},
+                {k('f')}, {k('w')}, {k('z')}, {k('j')},
+        };
+
+        // ---- _endConsonantTable ----
+        END_CONSONANT_TABLE = new int[][]{
+                {k('t')}, {k('p')}, {k('c')}, {k('n')}, {k('m')},
+                {k('g')}, {k('k')}, {k('h')},
+                {k('c'), k('h')}, {k('n'), k('h')}, {k('n'), k('g')},
         };
     }
 
     // ------------------------------------------------------------------
-    // Onsets
+    // Per-word engine state
     // ------------------------------------------------------------------
 
-    /** Raw onsets ordered longest-first; "" always matches. */
-    private static final String[] ONSETS = {
-            "ngh",
-            "ch", "gh", "gi", "kh", "nh", "ph", "th", "tr", "ng", "dd",
-            "b", "c", "d", "g", "h", "k", "l", "m", "n", "p", "q", "r",
-            "s", "t", "v", "x", "w", ""
-    };
+    private final int[] word = new int[MAX_BUFF];
+    private int index = 0;
+    private boolean tempDisableKey = false;
 
-    private static String onsetDisplay(String rawOnset) {
-        if (rawOnset.equals("dd")) {
-            return "đ";
-        }
-        if (rawOnset.equals("w")) {
-            return "ư";
-        }
-        return rawOnset;
-    }
+    // vowel scan results
+    private int vowelStartIndex = 0;
+    private int vowelEndIndex = 0;
+    private int vowelCount = 0;
+    private int vowelWillSetMark = 0;
 
     // ------------------------------------------------------------------
     // Public API
     // ------------------------------------------------------------------
 
     /**
-     * Converts one word of raw telex text to its Vietnamese display form.
-     * Returns the input unchanged when it cannot be parsed as (part of) a
-     * Vietnamese syllable.
+     * Converts one word of raw typed text to its Vietnamese display form.
+     * Words longer than {@link #MAX_BUFF} are returned unchanged.
      */
-    public static String convert(String word) {
-        if (word == null || word.isEmpty()) {
-            return word;
+    public static String convert(String raw) {
+        String normalized = normalize(raw);
+        if (normalized == null || normalized.isEmpty()) {
+            return normalized;
         }
-        String lower = word.toLowerCase(Locale.ROOT);
-        lower = RAW_OVERRIDES.getOrDefault(lower, lower);
-
-        String bestOnset = null;
-        Match best = null;
-
-        for (String onset : ONSETS) {
-            if (!lower.startsWith(onset)) {
-                continue;
-            }
-            String rest = lower.substring(onset.length());
-            Match m = matchRhyme(rest);
-            if (m == null) {
-                continue;
-            }
-            if (m.exact()) {
-                // first exact match wins (longest onset tried first)
-                return render(word, onset, m);
-            }
-            if (best == null) {
-                best = m;
-                bestOnset = onset;
-            }
+        if (normalized.length() > MAX_BUFF) {
+            return raw;
         }
-        if (best != null) {
-            return render(word, bestOnset, best);
+        TelexEngine e = new TelexEngine();
+        for (int i = 0; i < normalized.length(); i++) {
+            e.feed(normalized.charAt(i));
         }
-        return word; // not Vietnamese-shaped: keep literal
+        return e.render(raw);
     }
 
-    // ------------------------------------------------------------------
-    // Matching
-    // ------------------------------------------------------------------
-
-    private record Match(Rhyme rhyme, boolean exact, Character tone, String restAfterTone) {
-    }
+    private static final String UO_SUFFIXES = "|uong|uon|uoi|uoc|uot|uom|uop|";
+    private static final String IE_SUFFIXES = "|ien|ieng|iem|iet|iep|yen|yeng|yem|yet|";
 
     /**
-     * Tries to interpret rest (the part after the onset) as a rhyme,
-     * optionally with one tone key inserted anywhere in it.
+     * Mod-specific pre-pass on top of OpenKey:
+     * frequent lexical/glide shortcuts that pure structure cannot express.
+     * - "khong" -> "khoong"
+     * - bare glide endings get an explicit modifier appended ("duong" -> "duongw",
+     *   "dien" -> "dieen"), so OpenKey's pair rules produce dương/người/diên
+     *   while incomplete words stay literal.
      */
-    private static Match matchRhyme(String rest) {
-        if (rest.isEmpty()) {
-            // bare onset while typing ("d", "ch", ...) - valid partial
-            return new Match(null, false, null, "");
+    private static String normalize(String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return raw;
+        }
+        String lower = raw.toLowerCase(Locale.ROOT);
+        if (lower.equals("khong")) {
+            return sameCase(raw, "khoong");
+        }
+        if (lower.indexOf('w') >= 0 || lower.length() < 3 || lower.length() > MAX_BUFF - 1) {
+            return raw;
         }
 
-        Rhyme exact = BY_RAW.get(rest);
-        if (exact != null) {
-            return new Match(exact, true, null, rest);
+        // split off one trailing tone key
+        String body = raw;
+        String toneTail = "";
+        char last = Character.toLowerCase(body.charAt(body.length() - 1));
+        if ("sfrxj".indexOf(last) >= 0 && body.length() > 3) {
+            toneTail = String.valueOf(body.charAt(body.length() - 1));
+            body = body.substring(0, body.length() - 1);
+        }
+        String bodyLower = body.toLowerCase(Locale.ROOT);
+
+        String ins = null;
+        int pos = body.length();
+        String suf4 = bodyLower.length() >= 4 ? bodyLower.substring(bodyLower.length() - 4) : "";
+        String suf3 = bodyLower.substring(Math.max(0, bodyLower.length() - 3));
+        if (UO_SUFFIXES.contains("|" + suf4 + "|")) {
+            ins = "w"; // e.g. duong -> duongw (modifier goes to the end, OpenKey pair rules)
+        } else if (UO_SUFFIXES.contains("|" + suf3 + "|")) {
+            ins = "w"; // e.g. nguoi -> nguoiw
+        } else if (IE_SUFFIXES.contains("|" + suf4 + "|")) {
+            ins = "e"; // dien -> dieen
+            pos = body.length() - suf4.length() + 2;
+        } else if (IE_SUFFIXES.contains("|" + suf3 + "|")) {
+            ins = "e";
+            pos = body.length() - suf3.length() + 2;
         }
 
-        // tone key extraction: remove one occurrence and retry
-        for (int t = 0; t < TONE_KEYS.length(); t++) {
-            char tc = TONE_KEYS.charAt(t);
-            int idx = rest.indexOf(tc);
-            if (idx < 0) {
-                continue;
-            }
-            String stripped = rest.substring(0, idx) + rest.substring(idx + 1);
-            Rhyme exactToned = BY_RAW.get(stripped);
-            if (exactToned != null) {
-                return new Match(exactToned, true, tc, stripped);
-            }
-            if (startsWithAnyRaw(stripped)) {
-                return new Match(null, false, tc, stripped);
-            }
+        if (ins == null) {
+            return raw;
         }
-
-        if (startsWithAnyRaw(rest)) {
-            return new Match(null, false, null, rest);
-        }
-        return null;
+        char inserted = Character.isUpperCase(body.charAt(pos > 0 ? pos - 1 : 0))
+                ? Character.toUpperCase(ins.charAt(0)) : ins.charAt(0);
+        return body.substring(0, pos) + inserted + body.substring(pos) + toneTail;
     }
 
-    private static boolean startsWithAnyRaw(String s) {
-        for (Rhyme r : RHYMES) {
-            for (String raw : r.raws()) {
-                if (raw.startsWith(s)) {
-                    return true;
+    private static String sameCase(String source, String target) {
+        String upper = source.toUpperCase(Locale.ROOT);
+        if (source.equals(upper)) {
+            return target.toUpperCase(Locale.ROOT);
+        }
+        StringBuilder sb = new StringBuilder(target);
+        for (int i = 0; i < Math.min(source.length(), sb.length()); i++) {
+            if (Character.isUpperCase(source.charAt(i))) {
+                sb.setCharAt(i, Character.toUpperCase(sb.charAt(i)));
+            }
+        }
+        return sb.toString();
+    }
+
+    // ------------------------------------------------------------------
+    // Key intake (port of vKeyHandleEvent, letters only)
+    // ------------------------------------------------------------------
+
+    private void feed(char c) {
+        char lower = Character.toLowerCase(c);
+        boolean caps = lower != c;
+        if (lower < 'a' || lower > 'z') {
+            return;
+        }
+
+        boolean special = isSpecialKey(lower);
+        if (!special || tempDisableKey) {
+            insertKey(lower, caps);
+        } else {
+            handleMainKey(lower, caps);
+        }
+
+        // OpenKey runs checkGrammar after every processed key except d
+        if (lower != 'd') {
+            checkGrammar();
+        }
+    }
+
+    private static boolean isSpecialKey(char c) {
+        return c == 's' || c == 'f' || c == 'r' || c == 'x' || c == 'j'
+                || c == 'a' || c == 'o' || c == 'e' || c == 'w'
+                || c == 'd' || c == 'z';
+    }
+
+    private static boolean isMarkKey(char c) {
+        return c == 's' || c == 'f' || c == 'r' || c == 'j' || c == 'x';
+    }
+
+    private char chr(int i) {
+        return (char) (word[i] & 0xFF);
+    }
+
+    private static boolean isConsonant(char c) {
+        return !(c == 'a' || c == 'e' || c == 'u' || c == 'y' || c == 'i' || c == 'o');
+    }
+
+    private void insertKey(char keyCode, boolean caps) {
+        if (index >= MAX_BUFF) {
+            // left shift, keep the tail
+            for (int i = 0; i < MAX_BUFF - 1; i++) {
+                word[i] = word[i + 1];
+            }
+            word[MAX_BUFF - 1] = keyCode | (caps ? CAPS : 0);
+        } else {
+            word[index++] = keyCode | (caps ? CAPS : 0);
+        }
+        checkSpelling(false);
+
+        // allow d after consonant (OpenKey insertKey tail)
+        if (keyCode == 'd' && index - 2 >= 0 && isConsonant(chr(index - 2))) {
+            tempDisableKey = false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Main dispatch (port of handleMainKey)
+    // ------------------------------------------------------------------
+
+    private void handleMainKey(char data, boolean caps) {
+        // Z: remove marks
+        if (data == 'z') {
+            boolean changed = removeMarksInVowelRange();
+            if (!changed) {
+                insertKey(data, caps);
+            }
+            return;
+        }
+
+        // D: dd -> đ
+        if (data == 'd') {
+            boolean changed = false;
+            for (int[] entry : CONSONANT_D) {
+                if (index < entry.length) {
+                    continue;
+                }
+                boolean correct = checkCorrectVowel(entry, index, 'd');
+                if (!correct && index - 2 >= 0 && chr(index - 1) == 'd' && isConsonant(chr(index - 2))) {
+                    correct = true; // allow d after consonant
+                }
+                if (correct) {
+                    changed = true;
+                    insertD();
+                    break;
+                }
+            }
+            if (!changed) {
+                insertKey(data, caps);
+            }
+            return;
+        }
+
+        // Mark keys
+        if (isMarkKey(data)) {
+            int markMask = switch (data) {
+                case 's' -> M1;
+                case 'f' -> M2;
+                case 'r' -> M3;
+                case 'x' -> M4;
+                default -> M5; // j
+            };
+            int[][][] groups = {
+                    VOWEL_FOR_MARK.get('a'), VOWEL_FOR_MARK.get('o'),
+                    VOWEL_FOR_MARK.get('e'), VOWEL_FOR_MARK.get('i'),
+                    VOWEL_FOR_MARK.get('u'), VOWEL_FOR_MARK.get('y'),
+            };
+            boolean changed = false;
+            for (int[][] charset : groups) {
+                if (charset == null) {
+                    continue;
+                }
+                for (int[] entry : charset) {
+                    if (index < entry.length) {
+                        continue;
+                    }
+                    if (checkCorrectVowel(entry, index, data)) {
+                        insertMark(markMask);
+                        changed = true;
+                        break;
+                    }
+                }
+                if (changed) {
+                    break;
+                }
+            }
+            if (!changed) {
+                insertKey(data, caps);
+            }
+            return;
+        }
+
+        // Vowel-modifier keys: a/o/e (circumflex) and w (horn)
+        boolean isDouble = data == 'a' || data == 'o' || data == 'e';
+        boolean isW = data == 'w';
+        int[][] charset = VOWEL.get(data);
+        boolean changed = false;
+        for (int[] entry : charset) {
+            if (index < entry.length) {
+                continue;
+            }
+            if (checkCorrectVowel(entry, index, data)) {
+                changed = true;
+                if (isDouble) {
+                    insertAOE(data);
+                } else if (isW) {
+                    insertW(data);
+                }
+                break;
+            }
+        }
+
+        if (!changed) {
+            if (isW) {
+                checkForStandaloneChar(caps);
+            } else {
+                insertKey(data, caps);
+            }
+        }
+    }
+
+    /** Port of checkCorrectVowel: entry matches the word tail? */
+    private boolean checkCorrectVowel(int[] entry, int kIn, char markKey) {
+        // ignore "qu" case
+        if (index >= 2 && chr(index - 1) == 'u' && chr(index - 2) == 'q') {
+            return false;
+        }
+        int k = kIn - 1; // OpenKey compares starting at the LAST buffered character
+        for (int j = entry.length - 1; j >= 0; j--) {
+            if (entry[j] != chr(k)) {
+                return false;
+            }
+            k--;
+            if (k < 0) {
+                break;
+            }
+        }
+        // limit huyền/hỏi/ngã on endings containing c/t
+        if (entry.length > 1 && (markKey == 'f' || markKey == 'x' || markKey == 'r')) {
+            if (entry[1] == 'c' || entry[1] == 't') {
+                return false;
+            }
+            if (entry.length > 2 && entry[2] == 't') {
+                return false;
+            }
+        }
+        if (k >= 0 && chr(k) == chr(k + 1)) {
+            return false;
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // Transformations
+    // ------------------------------------------------------------------
+
+    private void insertD() {
+        for (int ii = index - 1; ii >= 0; ii--) {
+            if (chr(ii) == 'd') {
+                if ((word[ii] & TONE) != 0) {
+                    word[ii] &= ~TONE; // restore
+                    tempDisableKey = true;
+                } else {
+                    word[ii] |= TONE;
+                }
+                break;
+            }
+        }
+    }
+
+    private void insertAOE(char data) {
+        findAndCalculateVowel(false);
+        for (int ii = vowelStartIndex; ii <= vowelEndIndex && ii < index; ii++) {
+            word[ii] &= ~TONEW;
+        }
+        for (int ii = index - 1; ii >= 0; ii--) {
+            if (chr(ii) == data) {
+                if ((word[ii] & TONE) != 0) {
+                    word[ii] &= ~TONE; // restore
+                    if (data != 'o') {
+                        tempDisableKey = true;
+                    }
+                } else {
+                    word[ii] |= TONE;
+                    word[ii] &= ~TONEW;
+                }
+                break;
+            }
+        }
+    }
+
+    private void insertW(char data) {
+        findAndCalculateVowel(false);
+        for (int ii = vowelStartIndex; ii <= vowelEndIndex && ii < index; ii++) {
+            word[ii] &= ~TONE;
+        }
+
+        if (vowelCount > 1) {
+            boolean already = (word[vowelStartIndex] & TONEW) != 0 && (word[vowelStartIndex + 1] & TONEW) != 0
+                    || (word[vowelStartIndex] & TONEW) != 0 && chr(vowelStartIndex + 1) == 'i'
+                    || (word[vowelStartIndex] & TONEW) != 0 && chr(vowelStartIndex + 1) == 'a';
+            if (already) {
+                // restore and disable temporarily
+                for (int ii = vowelStartIndex; ii < index; ii++) {
+                    word[ii] &= ~TONEW;
+                }
+                tempDisableKey = true;
+                return;
+            }
+
+            if (chr(vowelStartIndex) == 'u' && chr(vowelStartIndex + 1) == 'o') {
+                if (vowelStartIndex - 2 >= 0 && chr(vowelStartIndex - 2) == 't' && chr(vowelStartIndex - 1) == 'h') {
+                    word[vowelStartIndex + 1] |= TONEW;
+                    if (vowelStartIndex + 2 < index && chr(vowelStartIndex + 2) == 'n') {
+                        word[vowelStartIndex] |= TONEW;
+                    }
+                } else if (vowelStartIndex - 1 >= 0 && chr(vowelStartIndex - 1) == 'q') {
+                    word[vowelStartIndex + 1] |= TONEW;
+                } else {
+                    word[vowelStartIndex] |= TONEW;
+                    word[vowelStartIndex + 1] |= TONEW;
+                }
+            } else if ((chr(vowelStartIndex) == 'u' && chr(vowelStartIndex + 1) == 'a')
+                    || (chr(vowelStartIndex) == 'u' && chr(vowelStartIndex + 1) == 'i')
+                    || (chr(vowelStartIndex) == 'u' && chr(vowelStartIndex + 1) == 'u')
+                    || (chr(vowelStartIndex) == 'o' && chr(vowelStartIndex + 1) == 'i')) {
+                word[vowelStartIndex] |= TONEW;
+            } else if ((chr(vowelStartIndex) == 'i' && chr(vowelStartIndex + 1) == 'o')
+                    || (chr(vowelStartIndex) == 'o' && chr(vowelStartIndex + 1) == 'a')) {
+                word[vowelStartIndex + 1] |= TONEW;
+            }
+            // otherwise: no-op (OpenKey disables temporarily)
+            return;
+        }
+
+        // single vowel in range
+        for (int ii = index - 1; ii >= 0; ii--) {
+            if (ii < vowelStartIndex) {
+                break;
+            }
+            char c = chr(ii);
+            if (c == 'a' || c == 'u' || c == 'o') {
+                if ((word[ii] & TONEW) != 0) {
+                    // restore and disable temporarily
+                    if ((word[ii] & STANDALONE) != 0) {
+                        if (c == 'u') {
+                            word[ii] = 'w' | (word[ii] & CAPS);
+                        } else if (c == 'o') {
+                            word[ii] = 'o' | (word[ii] & CAPS);
+                        }
+                    } else {
+                        word[ii] &= ~TONEW;
+                    }
+                    tempDisableKey = true;
+                } else {
+                    word[ii] |= TONEW;
+                    word[ii] &= ~TONE;
                 }
             }
         }
+    }
+
+    /** Port of checkForStandaloneChar for the w key (target ư). */
+    private void checkForStandaloneChar(boolean caps) {
+        // "ww" after a standalone ư: replace with plain w
+        if (index > 0 && chr(index - 1) == 'u' && (word[index - 1] & TONEW) != 0
+                && (word[index - 1] & STANDALONE) != 0) {
+            word[index - 1] = 'w' | (caps ? CAPS : 0);
+            return;
+        }
+
+        if (index == 0) {
+            pushStandaloneW(caps);
+            return;
+        }
+        if (index == 1) {
+            for (char bad : STANDALONE_W_BAD) {
+                if (chr(0) == bad) {
+                    insertKey('w', caps);
+                    return;
+                }
+            }
+            pushStandaloneW(caps);
+            return;
+        }
+        if (index == 2) {
+            for (char[] pair : DOUBLE_W_ALLOWED) {
+                if (chr(0) == pair[0] && chr(1) == pair[1]) {
+                    pushStandaloneW(caps);
+                    return;
+                }
+            }
+            insertKey('w', caps);
+            return;
+        }
+        insertKey('w', caps);
+    }
+
+    private void pushStandaloneW(boolean caps) {
+        if (index >= MAX_BUFF) {
+            insertKey('w', caps);
+            return;
+        }
+        word[index++] = 'w' | TONEW | STANDALONE | (caps ? CAPS : 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Marks (port of insertMark / handleOldMark / handleModernMark)
+    // ------------------------------------------------------------------
+
+    private void insertMark(int markMask) {
+        findAndCalculateVowel(false);
+        vowelWillSetMark = 0;
+
+        if (vowelCount == 1) {
+            vowelWillSetMark = vowelEndIndex;
+        } else {
+            handleOldMark();
+            if ((word[vowelEndIndex] & (TONE | TONEW)) != 0) {
+                vowelWillSetMark = vowelEndIndex;
+            }
+        }
+        vowelWillSetMark = clampVsm();
+
+        if ((word[vowelWillSetMark] & markMask) != 0) {
+            // duplicate mark: remove all marks and disable temporarily
+            for (int ii = vowelStartIndex; ii < index; ii++) {
+                word[ii] &= ~MARK_MASK;
+            }
+            tempDisableKey = true;
+        } else {
+            word[vowelWillSetMark] &= ~MARK_MASK;
+            word[vowelWillSetMark] |= markMask;
+            for (int ii = vowelStartIndex; ii < index; ii++) {
+                if (ii != vowelWillSetMark) {
+                    word[ii] &= ~MARK_MASK;
+                }
+            }
+        }
+    }
+
+    /** Guard the chosen index against pathological states. */
+    private int clampVsm() {
+        if (vowelWillSetMark < 0 || vowelWillSetMark >= index || vowelWillSetMark < vowelStartIndex) {
+            return vowelEndIndex < index ? vowelEndIndex : vowelStartIndex;
+        }
+        return vowelWillSetMark;
+    }
+
+    private void handleOldMark() {
+        if (vowelCount == 0 && chr(veIClamp()) == 'i') {
+            vowelWillSetMark = vowelEndIndex;
+        } else {
+            vowelWillSetMark = vowelStartIndex;
+        }
+
+        // rule 2
+        if (vowelCount == 3 || (vowelEndIndex + 1 < index && isConsonant(chr(vowelEndIndex + 1)) && canHasEndConsonant())) {
+            vowelWillSetMark = vowelStartIndex + 1;
+        }
+
+        // rule 3: prefer a vowel that already carries ^ or horn
+        for (int ii = vowelStartIndex; ii <= vowelEndIndex && ii < index; ii++) {
+            if ((chr(ii) == 'e' && (word[ii] & TONE) != 0) || (chr(ii) == 'o' && (word[ii] & TONEW) != 0)) {
+                vowelWillSetMark = ii;
+                break;
+            }
+        }
+    }
+
+    private int veIClamp() {
+        return vowelEndIndex < index ? vowelEndIndex : index - 1;
+    }
+
+    /** Unused modern variant kept for reference/parity with OpenKey. */
+    @SuppressWarnings("unused")
+    private void handleModernMark() {
+        vowelWillSetMark = vowelEndIndex;
+        // (modern orthography rules omitted - OpenKey defaults to the old style)
+    }
+
+    private boolean removeMarksInVowelRange() {
+        findAndCalculateVowel(true);
+        boolean changed = false;
+        for (int ii = vowelStartIndex; ii <= vowelEndIndex && ii < index; ii++) {
+            if ((word[ii] & MARK_MASK) != 0) {
+                word[ii] &= ~MARK_MASK;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    // ------------------------------------------------------------------
+    // Vowel discovery (port of findAndCalculateVowel)
+    // ------------------------------------------------------------------
+
+    private void findAndCalculateVowel(boolean forGrammar) {
+        vowelCount = 0;
+        vowelStartIndex = 0;
+        vowelEndIndex = 0;
+        for (int iii = index - 1; iii >= 0; iii--) {
+            char c = chr(iii);
+            if (isConsonant(c)) {
+                if (vowelCount > 0) {
+                    break;
+                }
+            } else {
+                if (vowelCount == 0) {
+                    vowelEndIndex = iii;
+                }
+                if (!forGrammar) {
+                    if (iii - 1 >= 0 && ((c == 'i' && chr(iii - 1) == 'g') || (c == 'u' && chr(iii - 1) == 'q'))) {
+                        break;
+                    }
+                }
+                vowelStartIndex = iii;
+                vowelCount++;
+            }
+        }
+        // don't count the u in "qu"
+        if (vowelStartIndex - 1 >= 0 && chr(vowelStartIndex) == 'u' && chr(vowelStartIndex - 1) == 'q') {
+            vowelStartIndex++;
+            vowelCount--;
+        }
+    }
+
+    private boolean canHasEndConsonant() {
+        int[][] vo = VOWEL_COMBINE.get(chr(vowelStartIndex));
+        if (vo == null) {
+            return false;
+        }
+        for (int[] pattern : vo) {
+            int kk = vowelStartIndex;
+            int iii = 1;
+            for (; iii < pattern.length; iii++) {
+                if (kk > vowelEndIndex || kk >= index
+                        || (chr(kk) | (word[kk] & TONE) | (word[kk] & TONEW)) != pattern[iii]) {
+                    break;
+                }
+                kk++;
+            }
+            if (iii >= pattern.length) {
+                return pattern[0] == 1;
+            }
+        }
         return false;
+    }
+
+    // ------------------------------------------------------------------
+    // Grammar fix-up (port of checkGrammar)
+    // ------------------------------------------------------------------
+
+    private void checkGrammar() {
+        if (index <= 1 || index >= MAX_BUFF) {
+            return;
+        }
+        findAndCalculateVowel(true);
+        if (vowelCount == 0) {
+            return;
+        }
+
+        boolean checked = false;
+        int l = vowelStartIndex;
+
+        // fix u/o horn split before ending consonants: "thuơn" -> thương, ưoi, ưom, ưoc
+        if (index >= 3) {
+            for (int i = index - 1; i >= 0; i--) {
+                char c = chr(i);
+                if (c == 'n' || c == 'c' || c == 'i' || c == 'm' || c == 'p' || c == 't') {
+                    if (i - 2 >= 0 && chr(i - 1) == 'o' && chr(i - 2) == 'u') {
+                        boolean xor = ((word[i - 1] & TONEW) != 0) ^ ((word[i - 2] & TONEW) != 0);
+                        if (xor) {
+                            word[i - 2] |= TONEW;
+                            word[i - 1] |= TONEW;
+                            checked = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // re-place an existing mark onto the correct vowel
+        if (index >= 2) {
+            for (int i = l; i <= vowelEndIndex && i < index; i++) {
+                int mark = word[i] & MARK_MASK;
+                if (mark != 0) {
+                    word[i] &= ~MARK_MASK;
+                    insertMark(mark);
+                    if (i != vowelWillSetMark) {
+                        checked = true;
+                    }
+                    break;
+                }
+            }
+        }
+        // (output rebuild unnecessary: the whole word is re-rendered by the caller)
+    }
+
+    // ------------------------------------------------------------------
+    // Spelling gate (port of checkSpelling)
+    // ------------------------------------------------------------------
+
+    private boolean spellOK;
+    private boolean spellVowelOK;
+
+    private void checkSpelling(boolean forceCheckVowel) {
+        spellOK = false;
+        spellVowelOK = true;
+        int end = index;
+
+        if (end > 0) {
+            int j = 0;
+            if (isConsonant(chr(0))) {
+                outer:
+                for (int[] onset : CONSONANT_TABLE) {
+                    if (end < onset.length) {
+                        continue;
+                    }
+                    for (int jj = 0; jj < onset.length; jj++) {
+                        if (end > jj && onset[jj] != chr(jj)) {
+                            continue outer;
+                        }
+                    }
+                    j = onset.length;
+                    break;
+                }
+            }
+
+            if (j == end) {
+                spellOK = true;
+            } else {
+                int k = j;
+                vowelStartIndex = k;
+                if (chr(vowelStartIndex) == 'u' && k > 0 && k < end - 1 && chr(vowelStartIndex - 1) == 'q') {
+                    k = k + 1;
+                    j = k;
+                    vowelStartIndex = k;
+                } else if (index >= 2 && chr(0) == 'g' && chr(1) == 'i' && index > 2 && isConsonant(chr(2))) {
+                    vowelStartIndex = k = j = 1;
+                }
+                for (int l = 0; l < 3; l++) {
+                    if (k < end && !isConsonant(chr(k))) {
+                        k++;
+                    }
+                }
+                if (k > j) {
+                    spellVowelOK = false;
+                    if (k - j > 1 && forceCheckVowel) {
+                        int[][] vowelSet = VOWEL_COMBINE.get(chr(j));
+                        if (vowelSet != null) {
+                            for (int[] pattern : vowelSet) {
+                                boolean bad = false;
+                                int ii = 1;
+                                for (; ii < pattern.length; ii++) {
+                                    if (j + ii - 1 < end
+                                            && pattern[ii] != (chr(j + ii - 1) | (word[j + ii - 1] & TONEW) | (word[j + ii - 1] & TONE))) {
+                                        bad = true;
+                                        break;
+                                    }
+                                }
+                                if (bad || (k < end && pattern[0] == 0)
+                                        || (j + ii - 1 < end && !isConsonant(chr(j + ii - 1)))) {
+                                    continue;
+                                }
+                                spellVowelOK = true;
+                                break;
+                            }
+                        }
+                    } else if (!isConsonant(chr(j))) {
+                        spellVowelOK = true;
+                    }
+
+                    // ending consonants
+                    endLoop:
+                    for (int[] ec : END_CONSONANT_TABLE) {
+                        for (int jj = 0; jj < ec.length; jj++) {
+                            if (end > k + jj && ec[jj] != chr(k + jj)) {
+                                continue endLoop;
+                            }
+                        }
+                        if (k + ec.length >= end) {
+                            spellOK = true;
+                            break;
+                        }
+                    }
+
+                    // "ch"/"t" endings reject huyền/ngã (and require sắc/nặng/ngang)
+                    if (spellOK) {
+                        if (index >= 3 && chr(index - 1) == 'h' && chr(index - 2) == 'c') {
+                            int v = word[index - 3];
+                            if ((v & M2) != 0 || (v & M3) != 0 || (v & M4) != 0) {
+                                spellOK = false;
+                            }
+                        } else if (index >= 2 && chr(index - 1) == 't') {
+                            int v = word[index - 2];
+                            if ((v & M2) != 0 || (v & M3) != 0 || (v & M4) != 0) {
+                                spellOK = false;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            spellOK = true;
+        }
+        tempDisableKey = !(spellOK && spellVowelOK);
     }
 
     // ------------------------------------------------------------------
     // Rendering
     // ------------------------------------------------------------------
 
-    private static String render(String original, String onset, Match m) {
-        StringBuilder sb = new StringBuilder(onsetDisplay(onset));
-        if (m.rhyme() != null) {
-            sb.append(toned(m.rhyme().display(), m.rhyme().anchor(), m.tone()));
-        } else {
-            // partial: map what we have so far
-            String partial = partialMap(m.restAfterTone());
-            if (m.tone() != null) {
-                if (!placeTone(partial, m.tone(), sb)) {
-                    // could not place the tone on the partial: show everything literally
-                    sb.append(partialMap(m.restAfterTone() + m.tone()));
-                }
-            } else {
-                sb.append(partial);
-            }
-        }
-        return applyCase(original, sb.toString());
-    }
+    private String render(String original) {
+        StringBuilder sb = new StringBuilder(index);
+        for (int i = 0; i < index; i++) {
+            int v = word[i];
+            char c = (char) (v & 0xFF);
+            boolean caps = (v & CAPS) != 0;
 
-    /** Applies a tone mark to the anchored vowel of a complete rhyme display. */
-    private static String toned(String display, int anchor, Character tone) {
-        if (tone == null || display.isEmpty()) {
-            return display;
-        }
-        char base = display.charAt(Math.min(anchor, display.length() - 1));
-        String[] marks = MARKS.get(base);
-        if (marks == null) {
-            return display;
-        }
-        int ti = TONE_INDEX[TONE_KEYS.indexOf(tone)];
-        return display.substring(0, anchor) + marks[ti] + display.substring(anchor + 1);
-    }
-
-    /** Greedy digraph mapping of an incomplete raw tail ("uo"->uong-glide, "aw"->a-breve, ...). */
-    private static String partialMap(String raw) {
-        StringBuilder sb = new StringBuilder();
-        int i = 0;
-        while (i < raw.length()) {
-            if (i + 1 < raw.length()) {
-                String two = raw.substring(i, i + 2);
-                String mapped = switch (two) {
-                    case "aa" -> "â";
-                    case "aw" -> "ă";
-                    case "ee" -> "ê";
-                    case "oo" -> "ô";
-                    case "ow" -> "ơ";
-                    case "uw" -> "ư";
-                    case "uo" -> "ươ";
-                    default -> null;
+            if (c == 'd' && (v & TONE) != 0) {
+                c = 'đ';
+            } else if ((v & TONE) != 0) {
+                c = switch (c) {
+                    case 'a' -> 'â';
+                    case 'e' -> 'ê';
+                    case 'o' -> 'ô';
+                    default -> c;
                 };
-                if (mapped != null) {
-                    sb.append(mapped);
-                    i += 2;
-                    continue;
+            } else if ((v & TONEW) != 0) {
+                c = switch (c) {
+                    case 'a' -> 'ă';
+                    case 'o' -> 'ơ';
+                    case 'u' -> 'ư';
+                    case 'w' -> 'ư'; // standalone w
+                    default -> c;
+                };
+            }
+
+            int mark = v & MARK_MASK;
+            if (mark != 0) {
+                String[] marks = MARKS.get(c);
+                if (marks != null) {
+                    int ti = switch (mark) {
+                        case M1 -> 1;
+                        case M2 -> 2;
+                        case M3 -> 3;
+                        case M4 -> 4;
+                        case M5 -> 5;
+                        default -> 0;
+                    };
+                    c = marks[ti].charAt(0);
                 }
             }
-            sb.append(raw.charAt(i));
-            i++;
-        }
-        return sb.toString();
-    }
 
-    /** Inserts a tone mark on the first vowel of partial; returns false when impossible. */
-    private static boolean placeTone(String partial, Character tone, StringBuilder out) {
-        for (int i = 0; i < partial.length(); i++) {
-            char c = partial.charAt(i);
-            String[] marks = MARKS.get(c);
-            if (marks != null) {
-                int ti = TONE_INDEX[TONE_KEYS.indexOf(tone)];
-                out.append(partial, 0, i).append(marks[ti]).append(partial.substring(i + 1));
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Copies the case pattern of the typed word onto the rendered display. */
-    private static String applyCase(String original, String displayLower) {
-        String lower = original.toLowerCase(Locale.ROOT);
-        if (original.equals(lower)) {
-            return displayLower;
-        }
-        String upper = original.toUpperCase(Locale.ROOT);
-        if (original.equals(upper)) {
-            return displayLower.toUpperCase(Locale.ROOT);
-        }
-        // capitalized or mixed: uppercase the first letter
-        StringBuilder sb = new StringBuilder(displayLower);
-        for (int i = 0; i < sb.length(); i++) {
-            if (Character.isLetter(sb.charAt(i))) {
-                sb.setCharAt(i, Character.toUpperCase(sb.charAt(i)));
-                break;
-            }
+            sb.append(caps ? Character.toUpperCase(c) : c);
         }
         return sb.toString();
     }

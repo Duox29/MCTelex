@@ -41,8 +41,8 @@ public final class ClientHooks {
             GLFW.GLFW_KEY_RIGHT_SHIFT,
             CATEGORY);
 
-    /** Trailing run of ASCII letters in the edit box value. */
-    private static final Pattern TAIL_WORD = Pattern.compile("[A-Za-z]+$");
+    /** Trailing run of ASCII letters in the edit box value (capturing group 1). */
+    private static final Pattern TAIL_WORD = Pattern.compile("([A-Za-z]+)$");
 
     /** Raw telex letters typed so far for the word currently being composed. */
     private static String rawWord = "";
@@ -170,7 +170,15 @@ public final class ClientHooks {
     /** Re-derives tracking state when the box was modified outside our control. */
     private static void syncIfChanged(EditBox box) {
         if (!box.getValue().equals(expected)) {
-            resync(box);
+            try {
+                resync(box);
+            } catch (Exception e) {
+                // fail-safe: never break typing - fall back to plain pass-through
+                VietnameseTelex.LOGGER.error("[VietnameseTelex] resync failed; passing through literally", e);
+                rawWord = "";
+                basePrefix = box.getValue();
+                expected = box.getValue();
+            }
         }
     }
 

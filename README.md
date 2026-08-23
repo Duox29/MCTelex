@@ -42,12 +42,15 @@ Unit test của engine chạy cùng build, hoặc riêng: ./gradlew test
 
 | File | Vai trò |
 | ---- | ------- |
-| TelexEngine.java | Java thuần, không phụ thuộc Minecraft: biến đổi ASCII → tiếng Việt theo bảng vần + kiểm tra hợp lệ |
+| TelexEngine.java | Port Java của **OpenKey engine** (OpenKey-master/Sources/OpenKey/engine): buffer phím + cờ TONE/TONEW/MARK/CAPS, bảng mẫu _vowel/_vowelForMark/_consonantD, checkGrammar tự đặt lại dấu sau mỗi phím |
 | ClientHooks.java | Bắt ScreenEvent.CharacterTyped / KeyPressed / Render khi ChatScreen mở, quản lý buffer thô của từ đang gõ |
 | VietnameseTelexClient.java | Entry point client: đăng ký config, keybind, event listeners |
 | TelexConfig.java | Config phía client (bật/tắt, chỉ báo) |
 
 Không dùng mixin — toàn bộ can thiệp input đi qua NeoForge events nên không dễ vỡ khi update phiên bản.
+
+Phần mở rộng riêng của mod so với OpenKey: tiền-chuẩn hóa `khong → khoong`
+và tự thêm modifier cho vần lướt gõ tắt (`duong → duongw`, `dien → dieen`).
 
 ## Giới hạn đã biết
 
