@@ -48,6 +48,18 @@ public final class ClientHooks {
     /** Full edit-box value the handler believes is currently shown. */
     private static String expected = "";
 
+    /**
+     * Windows IMEs (EVKey, OpenKey, Unikey, MS Japanese IME, ...) are known to
+     * deliver every committed character twice through GLFW (vanilla bug
+     * MC-122477 family). Debugify-style fixes suppress the duplicate insertion
+     * for vanilla, but our mixin still sees both events and would process each
+     * character twice. Collapse identical characters arriving within 5 ms -
+     * real typing of a repeated letter ("aa" for â) is always slower than
+     * that; keyboard auto-repeat never fires under ~30 ms.
+     */
+    private static char lastBurstChar;
+    private static long lastBurstNanos;
+
     // ------------------------------------------------------------------
     // Registration helpers
     // ------------------------------------------------------------------
@@ -88,10 +100,17 @@ public final class ClientHooks {
     /**
      * Called from {@code ScreenCharTypedMixin} for every screen character.
      *
-     * @return true when the character was consumed (caller must cancel vanilla),
-     *         false to let vanilla insert it normally
+     * @return true when the character was consumed or must be swallowed
+     *         (caller cancels vanilla), false to let vanilla insert it
      */
     public static boolean onCharTyped(Screen screen, char c) {
+        long now = System.nanoTime();
+        if (c == lastBurstChar && now - lastBurstNanos < 5_000_000L) {
+            return true; // IME echo of the previous event - swallow it
+        }
+        lastBurstChar = c;
+        lastBurstNanos = now;
+
         EditBox box = focusedChatBox(screen);
         if (box == null) {
             return false; // not ours - let vanilla type it
