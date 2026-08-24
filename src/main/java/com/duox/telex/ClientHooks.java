@@ -74,7 +74,9 @@ public final class ClientHooks {
             // no longer ships character-typed screen events).
             ScreenKeyboardEvents.allowKeyPress(screen).register((scr, keyEvent) ->
                     !onKeyPressed(scr, keyEvent));
-            ScreenEvents.afterForeground(screen).register((scr, graphics, mouseX, mouseY, tickDelta) ->
+            // 26.1's screen-api has no afterForeground; draw right after the
+            // screen background instead.
+            ScreenEvents.afterBackground(screen).register((scr, graphics, mouseX, mouseY, tickDelta) ->
                     onRender(graphics));
         });
     }
