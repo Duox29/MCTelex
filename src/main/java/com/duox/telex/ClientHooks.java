@@ -122,7 +122,7 @@ public final class ClientHooks {
             return;
         }
         Minecraft mc = Minecraft.getInstance();
-        if (mc.gui.screen() != null) {
+        if (mc.screen != null) {
             return; // handled by ScreenEvent.KeyPressed.Pre while chatting
         }
         if (TOGGLE_TELEX.matches(event.getKeyEvent())) {
