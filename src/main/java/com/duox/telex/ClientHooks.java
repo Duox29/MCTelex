@@ -50,7 +50,7 @@ public final class ClientHooks {
     /** Full edit-box value the handler believes is currently shown. */
     private static String expected = "";
 
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------sr
     // Registration helpers
     // ------------------------------------------------------------------
 
@@ -74,8 +74,10 @@ public final class ClientHooks {
 
             // Character input is intercepted via ScreenCharTypedMixin (Fabric API
             // no longer ships character-typed screen events).
+            // Fabric allow-events: return true = let vanilla process the key,
+            // false = cancel. onKeyPressed follows the same convention.
             ScreenKeyboardEvents.allowKeyPress(screen).register((scr, key, scanCode, modifiers) ->
-                    !onKeyPressed(scr, key, scanCode, modifiers));
+                    onKeyPressed(scr, key, scanCode, modifiers));
             ScreenEvents.afterRender(screen).register((scr, graphics, mouseX, mouseY, tickDelta) ->
                     onRender(graphics));
         });
@@ -92,20 +94,22 @@ public final class ClientHooks {
      */
     public static boolean onCharTyped(Screen screen, char c) {
         EditBox box = focusedChatBox(screen);
+        VietnameseTelex.LOGGER.info("[TelexDbg] char '{}' ({}), box={}", c, (int) c, box == null ? "null" : "'" + box.getValue() + "'");
         if (box == null) {
-            return true; // pass straight through to vanilla
+            return false; // not ours - let vanilla type it
         }
         boolean letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
         if (!letter || !caretAtEnd(box)) {
-            return true;
+            return false; // space, digits, punctuation, caret not at end: vanilla handles
         }
         syncIfChanged(box);
         rawWord += c;
         applyTo(box);
-        return true; // consumed
+        return true; // consumed - vanilla must not insert it again
     }
 
     private static boolean onKeyPressed(Screen screen, int keyCode, int scanCode, int modifiers) {
+        VietnameseTelex.LOGGER.info("[TelexDbg] key {} modifiers {}", keyCode, modifiers);
         // allow toggling even while the chat box is open
         if (keyCode != GLFW.GLFW_KEY_UNKNOWN
                 && TOGGLE_TELEX.matches(keyCode, scanCode)
@@ -208,5 +212,6 @@ public final class ClientHooks {
         box.setValue(full);
         box.moveCursorToEnd();
         expected = full;
+        VietnameseTelex.LOGGER.info("[TelexDbg] applyTo -> '{}' raw='{}'", full, rawWord);
     }
 }
