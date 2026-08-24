@@ -74,8 +74,10 @@ public final class ClientHooks {
 
             // Character input is intercepted via ScreenCharTypedMixin (Fabric API
             // no longer ships character-typed screen events).
+            // Fabric allow-events: return true = let vanilla process the key,
+            // false = cancel. onKeyPressed follows the same convention.
             ScreenKeyboardEvents.allowKeyPress(screen).register((scr, key, scanCode, modifiers) ->
-                    !onKeyPressed(scr, key, scanCode, modifiers));
+                    onKeyPressed(scr, key, scanCode, modifiers));
             ScreenEvents.afterRender(screen).register((scr, graphics, mouseX, mouseY, tickDelta) ->
                     onRender(graphics));
         });
@@ -88,21 +90,22 @@ public final class ClientHooks {
     /**
      * Called from {@code ScreenCharTypedMixin} for every screen character.
      *
-     * @return true when the character was consumed (caller must cancel vanilla)
+     * @return true when the character was consumed (caller must cancel vanilla),
+     *         false to let vanilla insert it normally
      */
     public static boolean onCharTyped(Screen screen, char c) {
         EditBox box = focusedChatBox(screen);
         if (box == null) {
-            return true; // pass straight through to vanilla
+            return false; // not ours - let vanilla type it
         }
         boolean letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
         if (!letter || !caretAtEnd(box)) {
-            return true;
+            return false; // space, digits, punctuation, caret not at end: vanilla handles
         }
         syncIfChanged(box);
         rawWord += c;
         applyTo(box);
-        return true; // consumed
+        return true; // consumed - vanilla must not insert it again
     }
 
     private static boolean onKeyPressed(Screen screen, int keyCode, int scanCode, int modifiers) {
