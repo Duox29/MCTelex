@@ -11,6 +11,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.KeyMapping;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.network.chat.Component;
 import net.neoforged.neoforge.client.event.InputEvent;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
@@ -32,14 +33,15 @@ public final class ClientHooks {
     private ClientHooks() {
     }
 
-    private static final String CATEGORY = "key.categories.misc";
-
     public static final KeyMapping TOGGLE_TELEX = new KeyMapping(
             "key.vietnamesetelex.toggle",
-            KeyConflictContext.IN_GAME,
             InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_RIGHT_SHIFT,
-            CATEGORY);
+            KeyMapping.Category.MISC);
+
+    static {
+        TOGGLE_TELEX.setKeyConflictContext(KeyConflictContext.IN_GAME);
+    }
 
     /** Trailing run of ASCII letters in the edit box value (capturing group 1). */
     private static final Pattern TAIL_WORD = Pattern.compile("([A-Za-z]+)$");
@@ -75,7 +77,7 @@ public final class ClientHooks {
         if (box == null) {
             return;
         }
-        char c = event.getCodePoint();
+        char c = (char) event.getCodePoint();
         boolean letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
         if (!letter || !caretAtEnd(box)) {
             return; // pass straight through to vanilla
@@ -88,7 +90,7 @@ public final class ClientHooks {
 
     public static void onKeyPressed(ScreenEvent.KeyPressed.Pre event) {
         // allow toggling even while the chat box is open
-        if (TOGGLE_TELEX.matches(event.getKeyCode(), event.getScanCode())
+        if (TOGGLE_TELEX.matches(event.getKeyEvent())
                 && (event.getModifiers() & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT | GLFW.GLFW_MOD_SUPER)) == 0) {
             toggle();
             event.setCanceled(true);
@@ -120,10 +122,10 @@ public final class ClientHooks {
             return;
         }
         Minecraft mc = Minecraft.getInstance();
-        if (mc.screen != null) {
+        if (mc.gui.screen() != null) {
             return; // handled by ScreenEvent.KeyPressed.Pre while chatting
         }
-        if (TOGGLE_TELEX.matches(event.getKey(), event.getScanCode())) {
+        if (TOGGLE_TELEX.matches(event.getKeyEvent())) {
             toggle();
         }
     }
@@ -138,7 +140,7 @@ public final class ClientHooks {
         }
         Minecraft mc = Minecraft.getInstance();
         Component text = Component.translatable("overlay.vietnamesetelex.indicator");
-        event.getGuiGraphics().drawString(mc.font, text, 6, 6, 0xFF55FFAA, true);
+        event.getGuiGraphics().text(mc.font, text, 6, 6, 0xFF55FFAA, true);
     }
 
     // ------------------------------------------------------------------
@@ -151,8 +153,8 @@ public final class ClientHooks {
 
         Minecraft mc = Minecraft.getInstance();
         if (mc.player != null) {
-            mc.player.displayClientMessage(Component.translatable(
-                    now ? "message.vietnamesetelex.enabled" : "message.vietnamesetelex.disabled"), true);
+            mc.player.sendOverlayMessage(Component.translatable(
+                    now ? "message.vietnamesetelex.enabled" : "message.vietnamesetelex.disabled"));
         }
     }
 
