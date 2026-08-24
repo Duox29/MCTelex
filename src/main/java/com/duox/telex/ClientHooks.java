@@ -14,7 +14,7 @@ import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenKeyboardEvents;
 
@@ -32,13 +32,11 @@ public final class ClientHooks {
     private ClientHooks() {
     }
 
-    private static final String CATEGORY = "key.categories.misc";
-
     public static final KeyMapping TOGGLE_TELEX = new KeyMapping(
             "key.vietnamesetelex.toggle",
             InputConstants.Type.KEYSYM,
             GLFW.GLFW_KEY_RIGHT_SHIFT,
-            CATEGORY);
+            KeyMapping.Category.MISC);
 
     /** Trailing run of ASCII letters in the edit box value (capturing group 1). */
     private static final Pattern TAIL_WORD = Pattern.compile("([A-Za-z]+)$");
@@ -56,7 +54,7 @@ public final class ClientHooks {
 
     public static void register() {
         TelexConfig.load();
-        KeyBindingHelper.registerKeyBinding(TOGGLE_TELEX);
+        KeyMappingHelper.registerKeyMapping(TOGGLE_TELEX);
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (TOGGLE_TELEX.consumeClick()) {
@@ -74,9 +72,9 @@ public final class ClientHooks {
 
             // Character input is intercepted via ScreenCharTypedMixin (Fabric API
             // no longer ships character-typed screen events).
-            ScreenKeyboardEvents.allowKeyPress(screen).register((scr, key, scanCode, modifiers) ->
-                    !onKeyPressed(scr, key, scanCode, modifiers));
-            ScreenEvents.afterRender(screen).register((scr, graphics, mouseX, mouseY, tickDelta) ->
+            ScreenKeyboardEvents.allowKeyPress(screen).register((scr, keyEvent) ->
+                    !onKeyPressed(scr, keyEvent));
+            ScreenEvents.afterForeground(screen).register((scr, graphics, mouseX, mouseY, tickDelta) ->
                     onRender(graphics));
         });
     }
@@ -105,11 +103,11 @@ public final class ClientHooks {
         return true; // consumed
     }
 
-    private static boolean onKeyPressed(Screen screen, int keyCode, int scanCode, int modifiers) {
+    private static boolean onKeyPressed(Screen screen, net.minecraft.client.input.KeyEvent keyEvent) {
+        int keyCode = keyEvent.key();
         // allow toggling even while the chat box is open
-        if (keyCode != GLFW.GLFW_KEY_UNKNOWN
-                && TOGGLE_TELEX.matches(keyCode, scanCode)
-                && (modifiers & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT | GLFW.GLFW_MOD_SUPER)) == 0) {
+        if (keyCode != GLFW.GLFW_KEY_UNKNOWN && TOGGLE_TELEX.matches(keyEvent)
+                && (keyEvent.modifiers() & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT | GLFW.GLFW_MOD_SUPER)) == 0) {
             toggle();
             return false; // consumed
         }
@@ -118,7 +116,7 @@ public final class ClientHooks {
         if (box == null || keyCode != GLFW.GLFW_KEY_BACKSPACE) {
             return true;
         }
-        if ((modifiers & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT | GLFW.GLFW_MOD_SUPER)) != 0) {
+        if ((keyEvent.modifiers() & (GLFW.GLFW_MOD_CONTROL | GLFW.GLFW_MOD_ALT | GLFW.GLFW_MOD_SUPER)) != 0) {
             return true; // ctrl/alt+backspace: let vanilla handle (delete word etc.)
         }
         if (!caretAtEnd(box) || !box.getHighlighted().isEmpty() || rawWord.isEmpty()) {
@@ -134,13 +132,13 @@ public final class ClientHooks {
     }
 
     /** Small status tag in the top-left corner while chatting. */
-    private static void onRender(net.minecraft.client.gui.GuiGraphics graphics) {
+    private static void onRender(net.minecraft.client.gui.GuiGraphicsExtractor graphics) {
         if (!TelexConfig.isEnabled() || !TelexConfig.showIndicator()) {
             return;
         }
         Minecraft mc = Minecraft.getInstance();
         Component text = Component.translatable("overlay.vietnamesetelex.indicator");
-        graphics.drawString(mc.font, text, 6, 6, 0xFF55FFAA, true);
+        graphics.text(mc.font, text, 6, 6, 0xFF55FFAA, true);
     }
 
     // ------------------------------------------------------------------
@@ -153,8 +151,8 @@ public final class ClientHooks {
 
         Minecraft mc = Minecraft.getInstance();
         if (mc.player != null) {
-            mc.player.displayClientMessage(Component.translatable(
-                    now ? "message.vietnamesetelex.enabled" : "message.vietnamesetelex.disabled"), true);
+            mc.player.sendOverlayMessage(Component.translatable(
+                    now ? "message.vietnamesetelex.enabled" : "message.vietnamesetelex.disabled"));
         }
     }
 
