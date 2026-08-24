@@ -4,9 +4,10 @@ import com.mojang.logging.LogUtils;
 
 import org.slf4j.Logger;
 
-import net.neoforged.bus.api.IEventBus;
-import net.neoforged.fml.ModContainer;
-import net.neoforged.fml.common.Mod;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import net.minecraftforge.fml.loading.FMLEnvironment;
 
 /**
  * Common entry point. All the interesting work happens on the client -
@@ -17,7 +18,10 @@ public class VietnameseTelex {
     public static final String MODID = "vietnamesetelex";
     public static final Logger LOGGER = LogUtils.getLogger();
 
-    public VietnameseTelex(IEventBus modEventBus, ModContainer modContainer) {
+    public VietnameseTelex() {
         LOGGER.info("[VietnameseTelex] common init");
+        if (FMLEnvironment.dist == Dist.CLIENT) {
+            new VietnameseTelexClient(FMLJavaModLoadingContext.get().getModEventBus());
+        }
     }
 }

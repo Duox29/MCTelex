@@ -1,6 +1,6 @@
 package com.duox.telex;
 
-import net.neoforged.neoforge.common.ModConfigSpec;
+import net.minecraftforge.common.ForgeConfigSpec;
 
 /**
  * Client-side configuration for the builtin Telex input method.
@@ -10,15 +10,15 @@ public final class TelexConfig {
     private TelexConfig() {
     }
 
-    private static final ModConfigSpec.Builder BUILDER = new ModConfigSpec.Builder();
+    private static final ForgeConfigSpec.Builder BUILDER = new ForgeConfigSpec.Builder();
 
-    public static final ModConfigSpec.BooleanValue ENABLED = BUILDER
+    public static final ForgeConfigSpec.BooleanValue ENABLED = BUILDER
             .comment("Enable the builtin Vietnamese Telex converter while typing in chat")
             .define("enabled", true);
 
-    public static final ModConfigSpec.BooleanValue SHOW_INDICATOR = BUILDER
+    public static final ForgeConfigSpec.BooleanValue SHOW_INDICATOR = BUILDER
             .comment("Show a small [TELEX] indicator in the top-left corner while the chat screen is open")
             .define("showIndicator", true);
 
-    public static final ModConfigSpec SPEC = BUILDER.build();
+    public static final ForgeConfigSpec SPEC = BUILDER.build();
 }

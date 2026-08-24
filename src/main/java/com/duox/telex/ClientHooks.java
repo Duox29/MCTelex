@@ -12,10 +12,10 @@ import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.network.chat.Component;
-import net.neoforged.neoforge.client.event.InputEvent;
-import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
-import net.neoforged.neoforge.client.event.ScreenEvent;
-import net.neoforged.neoforge.client.settings.KeyConflictContext;
+import net.minecraftforge.client.event.InputEvent;
+import net.minecraftforge.client.event.RegisterKeyMappingsEvent;
+import net.minecraftforge.client.event.ScreenEvent;
+import net.minecraftforge.client.settings.KeyConflictContext;
 
 /**
  * Client-side glue between Minecraft's chat input and {@link TelexEngine}.
@@ -75,7 +75,7 @@ public final class ClientHooks {
         if (box == null) {
             return;
         }
-        char c = event.getCodePoint();
+        char c = (char) event.getCodePoint();
         boolean letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
         if (!letter || !caretAtEnd(box)) {
             return; // pass straight through to vanilla
@@ -204,7 +204,7 @@ public final class ClientHooks {
         String display = TelexEngine.convert(rawWord);
         String full = basePrefix + display;
         box.setValue(full);
-        box.moveCursorToEnd(false);
+        box.moveCursorToEnd();
         expected = full;
     }
 }
